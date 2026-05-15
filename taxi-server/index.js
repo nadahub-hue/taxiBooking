@@ -74,28 +74,50 @@ console.log("CLIENT_URL:", process.env.CLIENT_URL);
 console.log("MONGODB_URI exists:", !!process.env.MONGODB_URI);
 
 /* -------------------- Middleware -------------------- */
-/* -------------------- Middleware -------------------- */
+// Render (and most PaaS hosts) terminate TLS at a proxy in front of Node.
+// We need to trust the proxy so secure cookies and req.protocol work.
+app.set("trust proxy", 1);
+
+// Build allowed-origins list from env + sensible defaults.
+const allowedOrigins = [
+  process.env.CLIENT_URL,
+  "http://localhost:5173",
+  "http://localhost:3000",
+].filter(Boolean);
+
 app.use(
   cors({
-    origin: [
-      process.env.CLIENT_URL || "http://localhost:5173",
-      "http://localhost:5173",
-      "http://localhost:3000",
-    ],
+    origin: (origin, callback) => {
+      // Allow requests with no Origin header (curl, server-to-server).
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      // Allow any subdomain of onrender.com / vercel.app / netlify.app.
+      try {
+        const host = new URL(origin).hostname;
+        if (/\.(onrender\.com|vercel\.app|netlify\.app)$/i.test(host)) {
+          return callback(null, true);
+        }
+      } catch (_) {}
+      return callback(new Error(`CORS: origin not allowed: ${origin}`), false);
+    },
     credentials: true,
   })
 );
 
 app.use(express.json());
 
+const isProduction = process.env.NODE_ENV === "production";
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "default_secret",
     resave: false,
     saveUninitialized: false,
     cookie: {
-      secure: false,
+      // In production behind HTTPS we need Secure + SameSite=None so the
+      // cookie travels cross-site between the frontend and this API.
+      secure: isProduction,
       httpOnly: true,
+      sameSite: isProduction ? "none" : "lax",
     },
   })
 );
@@ -298,8 +320,6 @@ app.post("/driverLogin", async (req, res) => {
   }
 });
 
-
-
 /* -------------------- Admin Login -------------------- */
 app.post("/adminLogin", async (req, res) => {
   try {
@@ -492,7 +512,6 @@ app.post("/confirmBooking", async (req, res) => {
       });
     }
 
-    // ✅ validate tripId first
     if (!req.body.tripId || !mongoose.Types.ObjectId.isValid(req.body.tripId)) {
       return res.status(400).json({
         serverMsg: "Invalid or missing tripId",
@@ -611,7 +630,6 @@ app.patch("/bookings/:bookingId/complete", async (req, res) => {
     booking.status = "completed";
     await booking.save();
 
-    // Notify all participants
     if (booking.participantEmails?.length) {
       for (const email of booking.participantEmails) {
         await pushNotification({
@@ -717,7 +735,6 @@ app.patch("/bookings/accept/:bookingId", async (req, res) => {
     booking.status = "driver_accepted";
     await booking.save();
 
-    // Notify all participants
     if (booking.participantEmails?.length) {
       for (const email of booking.participantEmails) {
         await pushNotification({
@@ -932,15 +949,6 @@ app.get("/users/online/:userId", async (req, res) => {
   }
 });
 
-/* -------------------- Health Check -------------------- */
-app.get("/", (req, res) => {
-  res.send("Travel Buddy backend is running");
-});
-
-/* -------------------- Start Server -------------------- */
-const PORT = process.env.PORT || 7500;
-const MONGO_URI = process.env.MONGODB_URI;
-
 /* -------------------- Notifications -------------------- */
 app.get("/notifications/:email", async (req, res) => {
   try {
@@ -1025,10 +1033,24 @@ app.post("/admin/notify", async (req, res) => {
   }
 });
 
+/* -------------------- Health Check -------------------- */
+app.get("/", (req, res) => {
+  res.send("Travel Buddy backend is running");
+});
+
+/* -------------------- Start Server -------------------- */
+const PORT = process.env.PORT || 7500;
+const MONGO_URI = process.env.MONGODB_URI;
+
 async function startServer() {
   try {
     if (!MONGO_URI) {
-      throw new Error("MONGODB_URI is missing in .env");
+      console.error(
+        "❌ MONGODB_URI environment variable is not set.\n" +
+        "   Local: put it in .env\n" +
+        "   Render: add it under your service's Environment tab.\n"
+      );
+      process.exit(1);
     }
 
     console.log("🔌 Connecting to MongoDB...");
@@ -1039,11 +1061,12 @@ async function startServer() {
 
     console.log("✅ Database Connected");
 
-    app.listen(PORT, () => {
-      console.log(`🚀 Server running on http://localhost:${PORT}`);
+    // Bind to 0.0.0.0 so Render/Docker can route traffic to the container.
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`🚀 Server running on port ${PORT}`);
     });
   } catch (err) {
-    console.error("❌ DB Connection Error:", err);
+    console.error("❌ Startup Error:", err);
     process.exit(1);
   }
 }
