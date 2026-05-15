@@ -4,7 +4,7 @@ import { useSelector } from "react-redux";
 
 import profileIcon from "../images/user (1).png";
 
-const SERVER = "http://localhost:7500";
+const SERVER = "https://taxibooking-4-z6lw.onrender.com";
 const MESSAGES_POLL_MS = 1500;   
 const SIDEBAR_POLL_MS = 3000;   
 
